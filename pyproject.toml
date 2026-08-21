@@ -1,0 +1,49 @@
+[project]
+name = "docmind"
+version = "0.1.0"
+description = "Agentic RAG assistant over Kubernetes documentation"
+requires-python = ">=3.11"
+dependencies = [
+    # Backend
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "python-dotenv>=1.0.1",
+
+    # Retrieval / embeddings / rerank
+    "sentence-transformers>=3.2.0",
+    "torch>=2.4.0",
+    "rank-bm25>=0.2.2",
+    "qdrant-client>=1.12.0",
+
+    # LLM orchestration
+    "langgraph>=0.2.40",
+    "langchain-core>=0.3.15",
+    "ollama>=0.3.3",
+    "anthropic>=0.39.0",
+    "openai>=1.54.0",
+
+    # Data / chunking
+    "markdown-it-py>=3.0.0",
+    "pyyaml>=6.0.2",
+    "tiktoken>=0.8.0",
+
+    # Eval
+    "ragas>=0.2.6",
+    "datasets>=3.1.0",
+
+    # Persistence
+    "sqlalchemy>=2.0.36",
+    "psycopg2-binary>=2.9.10",
+    "redis>=5.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "ruff>=0.7.4",
+    "ipykernel>=6.29.5",
+]
+
+[tool.ruff]
+line-length = 100
