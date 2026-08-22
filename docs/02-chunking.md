@@ -101,6 +101,20 @@ guessing from aggregate stats alone — this caught a fourth, non-logic issue: a
 `grep`-counting occurrences of the function name before and after each fix, since a partial
 match count was the tell that the update hadn't landed).
 
+**Bug 4 — chunk_id collisions (only surfaced once Phase 3 indexed into Qdrant).** The
+original `chunk_id` format, `{file}::{heading}::{piece_index}`, isn't unique when a file has
+two different sections sharing an identical heading name — generic subsection titles like
+"See Also" or "Examples" repeat often within one long page, each attached to a different
+parent topic. Two genuinely different chunks produced the same `chunk_id`, and since Phase 3
+derives a deterministic Qdrant point ID from `chunk_id`, the second chunk silently overwrote
+the first at index time — 852 of 11,116 chunks vanished with no error at all. This bug was
+invisible within Phase 2 itself (chunking ran fine, no exceptions, chunk count looked
+correct) — it only became visible as a mismatched point count in Qdrant. **Fixed** by
+including each section's position within the file (`s{section_idx}`) in the ID, which is
+unique regardless of heading text repetition. See docs/03-embeddings.md for the full story,
+including a second-order consequence (changing the ID scheme meant old and new IDs no longer
+matched, so a naive re-embed left duplicate stale points behind).
+
 ## Chunk size decision
 
 - **Prose docs:** `MIN_CHUNK_CHARS = 100`, target `MAX_CHUNK_CHARS = 1200` (~300 tokens).

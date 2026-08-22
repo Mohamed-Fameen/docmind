@@ -298,7 +298,7 @@ def process_file(filepath: Path, docs_root: Path) -> list[Chunk]:
     min_chars = MIN_CHUNK_CHARS_AUTO_GEN if auto_generated else MIN_CHUNK_CHARS
 
     chunks: list[Chunk] = []
-    for level, heading, content in split_by_headings(body):
+    for section_idx, (level, heading, content) in enumerate(split_by_headings(body)):
         if not content or len(content) < min_chars:
             continue
 
@@ -311,7 +311,14 @@ def process_file(filepath: Path, docs_root: Path) -> list[Chunk]:
         for idx, piece in enumerate(pieces):
             if len(piece) < min_chars:
                 continue
-            chunk_id = f"{rel_path.as_posix()}::{heading or 'intro'}::{idx}"
+            # section_idx (this section's position within the file) is what actually
+            # guarantees uniqueness — heading text alone is not enough. Generic subsection
+            # names like "See Also", "Examples", "Trade-offs" repeat within the SAME file
+            # (e.g. once per major topic on a long page), so two different sections could
+            # otherwise produce an identical chunk_id and silently collide when used as a
+            # deterministic point ID downstream (Phase 3 caught this: 852 of 11,116 chunks
+            # were missing from Qdrant due to exactly this collision).
+            chunk_id = f"{rel_path.as_posix()}::s{section_idx}::{heading or 'intro'}::{idx}"
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
