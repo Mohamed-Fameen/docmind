@@ -73,6 +73,31 @@ ollama pull llama3.1:8b
 uv run uvicorn backend.app.main:app --reload
 ```
 
+## Roadmap (post-Phase 9)
+
+Two larger architectural directions, deliberately deferred until the core 9-phase build is
+done end-to-end — noted here so the reasoning isn't lost, not because they're an afterthought:
+
+**1. Multi-source / multi-domain retrieval.** Right now DocMind is hard-wired to one corpus
+(Kubernetes docs) and one Qdrant collection. The retrieval architecture is already naturally
+decoupled from the rest of the pipeline (a "data source" is really just: a chunking strategy
++ a Qdrant collection + a BM25 index), so this generalizes to supporting several independent
+corpora — e.g. Kubernetes, Docker, Spring Boot — each in its own collection, with either (a)
+explicit user selection of which source to query, or (b) automatic routing based on detected
+query intent. The harder requirement is adding a new source without downtime: the ingestion
+pipeline (Phases 1-3) needs to be re-runnable against a new corpus into a *new* collection
+while the app keeps serving queries against existing collections, rather than requiring a
+full app restart or re-index of everything.
+
+**2. Systematic model comparison (3B local vs 8B+/hosted).** The model registry
+(`backend/app/config.py`) already supports switching generation models per-request — the
+next step is a proper eval harness (building on Phase 8's RAGAS work) that runs the *same*
+retrieved context through several models (e.g. `llama3.2-3b-local` vs a larger Bedrock model)
+and scores the answers, to get an actual measured answer to "how much does a bigger model
+improve quality once retrieval is already doing the heavy lifting" — rather than an assumed
+number. This is also the mechanism for backing up any "model X is Y% better" claim with real
+data instead of a guess.
+
 ## Status
 
 🚧 Phase 0 in progress — environment scaffolding.

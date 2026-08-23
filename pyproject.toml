@@ -22,6 +22,7 @@ dependencies = [
     "ollama>=0.3.3",
     "anthropic>=0.39.0",
     "openai>=1.54.0",
+    "boto3>=1.35.0",
 
     # Data / chunking
     "markdown-it-py>=3.0.0",
