@@ -221,7 +221,48 @@ to be incomplete — the second crash on a *smaller* model is what actually forc
 measurement instead of a plausible-sounding assumption, which is the difference between
 guessing at a fix and diagnosing a system.
 
-## Known limitations / things to revisit
+## Enhancements added after real-usage testing
+
+Testing the pipeline with an open-ended query ("Teach me how to learn kubernetes") surfaced
+gaps worth closing rather than just noting:
+
+**Citation validation.** The prompt asks the model to cite sources with `[N]`, but "the
+prompt asks for it" isn't the same as "the model does it correctly." A real test case showed
+the model citing sources `[2]`, `[2, 3]`, and `[3, 4]` while never citing `[1]` — a plausible,
+relevant source that just went unused. `/query` now parses the answer's actual citations and
+returns a `cited: bool` flag per source, so retrieved-but-ignored sources are visible instead
+of silently indistinguishable from ones that genuinely informed the answer. Building this
+caught its own bug immediately: the first version of the citation regex only matched
+single-number brackets (`[2]`) and silently missed grouped citations (`[2, 3]`) — caught by
+testing against the real logged answer rather than a hand-picked clean example, the same
+pattern that's caught every other real bug in this project so far.
+
+**Query logging.** Every `/query` call now appends to `data/logs/queries.jsonl` — timestamp,
+query, model used, answer, retrieved heading paths, citation counts, latency. This is
+deliberately built now rather than deferred to Phase 8, since an eval harness needs a corpus
+of real query/answer pairs to work with, and manually recreating test queries later throws
+away exactly the kind of real, sometimes-surprising examples (like the one above) that make
+for a better eval set than hand-picked "easy" questions.
+
+## Backlog — considered, not yet implemented
+
+- **Stronger anti-hallucination prompt wording.** Current instruction says "answer using
+  ONLY the sources below" — worth testing whether an explicit rule like "if you mention a
+  specific named resource (a course, tool, or tutorial), it must appear verbatim in the
+  sources above" measurably reduces ungrounded specifics, once Phase 8's eval can actually
+  measure "measurably" rather than spot-checking one query at a time.
+- **LLM call timeouts.** Neither the Ollama nor Bedrock call currently has an explicit
+  timeout — a hung local model or a slow Bedrock response would block that request
+  indefinitely. Worth adding once real latency numbers (from the new query log) show what a
+  reasonable timeout threshold actually is, rather than guessing a number.
+- **Per-stage latency instrumentation.** Right now only total request latency is logged —
+  breaking this down by stage (dense search / BM25 / fusion / rerank / generation) would
+  show where time actually goes, which matters more once comparing local CPU generation
+  against hosted Bedrock latency.
+- **Out-of-domain decline test.** Not yet verified: does the pipeline correctly say "I don't
+  know" for a clearly out-of-scope query (e.g. "how do I bake a cake"), or does a small local
+  model ignore the grounding instruction and hallucinate a plausible-sounding non-answer?
+  Worth a specific test case, not an assumption either way.
 
 - No streaming yet — the whole answer comes back in one response. Streaming is planned for
   Phase 7 (frontend), since it matters most for perceived responsiveness in a chat UI.
