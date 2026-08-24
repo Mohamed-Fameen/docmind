@@ -1,10 +1,11 @@
 """
-DocMind backend — the /query endpoint ties retrieval (Phase 3's hybrid search + reranking)
-to generation (any model in config.py's MODEL_REGISTRY) into one RAG request.
+DocMind backend — the /query endpoint routes each request through the Phase 5 agent graph
+(classify -> direct/clarify/retrieve, with a confidence-based retry loop), which internally
+uses Phase 4's retrieval (hybrid search + reranking) and generation (model registry) building
+blocks.
 """
 
 import json
-import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -13,21 +14,24 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from .agent import build_agent_graph
+from .citations import extract_cited_numbers
 from .config import settings
-from .llm import build_prompt, generate_answer
 from .retrieval import RetrievalPipeline
 
 pipeline = RetrievalPipeline()
+agent_graph = None  # built at startup, once the pipeline has loaded — see lifespan()
 
 QUERY_LOG_PATH = Path("data/logs/queries.jsonl")
-CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global agent_graph
     # Load the embedding model, reranker, and BM25 index ONCE at startup — these are
     # expensive to load (seconds) and must not be reloaded on every request.
     pipeline.load()
+    agent_graph = build_agent_graph(pipeline)
     QUERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     yield
 
@@ -44,6 +48,7 @@ class SourceRef(BaseModel):
     number: int
     heading_path: str
     doc_url: str
+    text_snippet: str  # distinguishes same-heading chunks that are genuinely different content
     cited: bool  # whether the answer text actually referenced this source's [N] number
 
 
@@ -51,32 +56,13 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list[SourceRef]
     model_used: str
-
-
-def _extract_cited_numbers(answer: str) -> set[int]:
-    """
-    Parses citation numbers out of the answer text, e.g. [2] or [2, 3]. This exists because
-    "the prompt asks the model to cite sources" is not the same as "the model actually did"
-    — especially with smaller local models, which don't always follow instructions
-    perfectly. Surfacing which retrieved sources were actually cited (vs retrieved but
-    ignored) makes that gap visible instead of silently trusting the prompt did its job.
-
-    Handles multi-number citations like "[2, 3]" — an earlier version of this regex only
-    matched single-number brackets and silently missed grouped citations, which the model
-    produces regularly in practice (caught by testing against a real logged answer, not a
-    hand-picked example).
-    """
-    numbers = set()
-    for match in CITATION_RE.findall(answer):
-        numbers.update(int(n.strip()) for n in match.split(","))
-    return numbers
+    classification: str  # "direct" | "clarify" | "retrieve" — visible for debugging/eval
+    retries: int          # how many times the agent rewrote the query and re-retrieved
 
 
 def _log_query(
     query_text: str,
-    model_used: str,
-    chunks: list[dict],
-    answer: str,
+    result: dict,
     cited_numbers: set[int],
     latency_seconds: float,
 ):
@@ -88,13 +74,16 @@ def _log_query(
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "query": query_text,
-        "model_used": model_used,
-        "answer": answer,
-        "num_sources_retrieved": len(chunks),
+        "final_query": result["query"],  # differs from `query` if the agent rewrote it
+        "classification": result["classification"],
+        "retries": result["retry_count"],
+        "model_used": result["model_used"],
+        "answer": result["answer"],
+        "num_sources_retrieved": len(result["chunks"]),
         "num_sources_cited": len(cited_numbers),
         "cited_numbers": sorted(cited_numbers),
         "latency_seconds": round(latency_seconds, 2),
-        "retrieved_heading_paths": [c["heading_path"] for c in chunks],
+        "retrieved_heading_paths": [c["heading_path"] for c in result["chunks"]],
     }
     with QUERY_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
@@ -102,7 +91,7 @@ def _log_query(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "phase": "4 — backend RAG core"}
+    return {"status": "ok", "phase": "5 — agentic layer"}
 
 
 @app.get("/models")
@@ -124,10 +113,10 @@ def list_models():
 def query(request: QueryRequest):
     """
     Note: this is a sync `def`, not `async def`. FastAPI runs sync route functions in a
-    threadpool automatically — appropriate here since embedding, BM25 scoring, and
-    reranking are all CPU/GPU-bound blocking calls, not I/O-bound async-friendly ones.
-    Declaring this `async def` while calling blocking code inside it would instead block
-    the whole event loop, stalling every other in-flight request.
+    threadpool automatically — appropriate here since embedding, BM25 scoring, reranking,
+    and LLM generation are all CPU/GPU-bound blocking calls, not I/O-bound async-friendly
+    ones. Declaring this `async def` while calling blocking code inside it would instead
+    block the whole event loop, stalling every other in-flight request.
     """
     if request.model and request.model not in settings.MODEL_REGISTRY:
         available = ", ".join(settings.MODEL_REGISTRY.keys())
@@ -137,16 +126,35 @@ def query(request: QueryRequest):
         )
 
     start = time.monotonic()
-    chunks = pipeline.retrieve(request.query)
-    prompt, source_refs = build_prompt(request.query, chunks)
-    answer, model_used = generate_answer(prompt, model_name=request.model)
+
+    initial_state = {
+        "query": request.query,
+        "original_query": request.query,
+        "model": request.model,
+        "classification": "",
+        "chunks": [],
+        "source_refs": [],
+        "answer": "",
+        "model_used": "",
+        "retry_count": 0,
+        "confidence": "",
+    }
+    result = agent_graph.invoke(initial_state)
+
     latency = time.monotonic() - start
 
-    cited_numbers = _extract_cited_numbers(answer)
+    cited_numbers = extract_cited_numbers(result["answer"])
     sources = [
-        SourceRef(**ref, cited=(ref["number"] in cited_numbers)) for ref in source_refs
+        SourceRef(**ref, cited=(ref["number"] in cited_numbers))
+        for ref in result["source_refs"]
     ]
 
-    _log_query(request.query, model_used, chunks, answer, cited_numbers, latency)
+    _log_query(request.query, result, cited_numbers, latency)
 
-    return QueryResponse(answer=answer, sources=sources, model_used=model_used)
+    return QueryResponse(
+        answer=result["answer"],
+        sources=sources,
+        model_used=result["model_used"],
+        classification=result["classification"],
+        retries=result["retry_count"],
+    )

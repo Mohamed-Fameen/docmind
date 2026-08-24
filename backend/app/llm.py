@@ -23,6 +23,13 @@ def build_prompt(query: str, chunks: list[dict]) -> tuple[str, list[dict]]:
                 "number": i,
                 "heading_path": chunk["heading_path"],
                 "doc_url": chunk["doc_url"],
+                # Distinguishes chunks that share an identical heading_path (a long
+                # section split into multiple pieces in Phase 2 — same heading, genuinely
+                # different content) — without this, two such sources look indistinguishable
+                # in the API response even though they're not duplicates. Found via a real
+                # query during Phase 5 testing ("Configure Multiple Schedulers" appearing
+                # twice), not a hypothetical concern.
+                "text_snippet": chunk["text"][:150].strip(),
             }
         )
 
