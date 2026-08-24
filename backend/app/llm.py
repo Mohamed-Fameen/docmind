@@ -9,10 +9,17 @@ stop an LLM from making things up if the prompt doesn't explicitly forbid it.
 from .config import settings
 
 
-def build_prompt(query: str, chunks: list[dict]) -> tuple[str, list[dict]]:
+def build_prompt(
+    query: str, chunks: list[dict], history: list[dict] | None = None
+) -> tuple[str, list[dict]]:
     """
     Returns (prompt, source_refs). source_refs maps citation numbers to the metadata a
     frontend would need to render a clickable source link (Phase 7).
+
+    `history` (Phase 6): recent prior turns in this conversation, as
+    [{"role": "user"|"assistant", "content": "..."}], oldest first. This is what lets a
+    follow-up like "what about DaemonSets instead?" resolve "instead of what" — without it,
+    every query is answered in total isolation from anything asked before it.
     """
     context_blocks = []
     source_refs = []
@@ -35,12 +42,19 @@ def build_prompt(query: str, chunks: list[dict]) -> tuple[str, list[dict]]:
 
     context = "\n\n".join(context_blocks)
 
+    history_block = ""
+    if history:
+        turns = "\n".join(f"{h['role'].upper()}: {h['content']}" for h in history)
+        history_block = f"CONVERSATION SO FAR:\n{turns}\n\n"
+
     prompt = f"""You are a Kubernetes documentation assistant. Answer the user's question \
 using ONLY the information in the sources below. Cite sources inline using their number in \
 brackets, like [1]. If the sources don't contain enough information to answer, say so \
-directly rather than guessing or using outside knowledge.
+directly rather than guessing or using outside knowledge. Use the conversation so far (if \
+any) only to understand what the user is referring to — never as a source of facts about \
+Kubernetes itself, since only the SOURCES below are grounded in real documentation.
 
-SOURCES:
+{history_block}SOURCES:
 {context}
 
 QUESTION: {query}

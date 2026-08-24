@@ -70,6 +70,18 @@ Original question: "{query}"
 
 Rewritten query:"""
 
+CONTEXTUALIZE_PROMPT = """Given the conversation so far and a follow-up message, rewrite \
+the follow-up as a standalone question that makes full sense without seeing the earlier \
+conversation. If the follow-up already stands alone, just repeat it unchanged. Reply with \
+ONLY the rewritten question, no explanation.
+
+CONVERSATION SO FAR:
+{history}
+
+FOLLOW-UP: "{query}"
+
+STANDALONE QUESTION:"""
+
 CLARIFY_FALLBACK = (
     "Could you say a bit more about what you'd like to know? For example, are you asking "
     "about a specific Kubernetes resource (like Pods or Deployments), a kubectl command, or "
@@ -81,6 +93,7 @@ class AgentState(TypedDict):
     query: str              # current query — gets overwritten on retry with a rewritten one
     original_query: str     # preserved for logging, unaffected by rewrites
     model: str | None
+    history: list[dict]     # prior conversation turns, oldest first — see llm.build_prompt
     classification: str
     chunks: list[dict]
     source_refs: list[dict]
@@ -128,7 +141,7 @@ def build_agent_graph(pipeline: RetrievalPipeline):
 
     def retrieve_and_generate_node(state: AgentState) -> dict:
         chunks = pipeline.retrieve(state["query"])
-        prompt, source_refs = build_prompt(state["query"], chunks)
+        prompt, source_refs = build_prompt(state["query"], chunks, history=state["history"])
         answer, model_used = generate_answer(prompt, model_name=state["model"])
         return {
             "chunks": chunks,
@@ -154,6 +167,32 @@ def build_agent_graph(pipeline: RetrievalPipeline):
         rewritten = rewritten.strip().strip('"').strip("'")
         return {"query": rewritten, "retry_count": state["retry_count"] + 1}
 
+    def contextualize_query_node(state: AgentState) -> dict:
+        """
+        Rewrites a follow-up like "what about a DaemonSet instead?" into a standalone
+        query like "how do I create a DaemonSet in Kubernetes" BEFORE retrieval runs.
+
+        This exists because history was originally only threaded into the generation
+        prompt, not the retrieval query — a real gap found by testing an actual follow-up
+        question: retrieval on the raw elliptical text ("what about X instead?") returned
+        only loosely-related generic chunks about X, never anything about how to actually
+        DO the thing being asked, because retrieval never saw "instead of what". The model
+        then partially hallucinated citation support to cover for the gap in what was
+        actually retrieved — a good example of how a retrieval-side gap can surface as a
+        generation-side hallucination two steps downstream.
+
+        No-op (query unchanged) when there's no history — the common case, and the cost of
+        an extra LLM call isn't worth paying for a query that was already self-contained.
+        """
+        if not state["history"]:
+            return {}
+
+        history_text = "\n".join(f"{h['role'].upper()}: {h['content']}" for h in state["history"])
+        prompt = CONTEXTUALIZE_PROMPT.format(history=history_text, query=state["query"])
+        rewritten, _ = generate_answer(prompt, model_name=state["model"])
+        rewritten = rewritten.strip().strip('"').strip("'")
+        return {"query": rewritten}
+
     def route_after_classify(state: AgentState) -> str:
         return state["classification"]
 
@@ -166,6 +205,7 @@ def build_agent_graph(pipeline: RetrievalPipeline):
     graph.add_node("classify", classify_node)
     graph.add_node("direct", direct_node)
     graph.add_node("clarify", clarify_node)
+    graph.add_node("contextualize", contextualize_query_node)
     graph.add_node("retrieve_generate", retrieve_and_generate_node)
     graph.add_node("check_confidence", check_confidence_node)
     graph.add_node("rewrite_query", rewrite_query_node)
@@ -174,10 +214,11 @@ def build_agent_graph(pipeline: RetrievalPipeline):
     graph.add_conditional_edges(
         "classify",
         route_after_classify,
-        {"direct": "direct", "clarify": "clarify", "retrieve": "retrieve_generate"},
+        {"direct": "direct", "clarify": "clarify", "retrieve": "contextualize"},
     )
     graph.add_edge("direct", END)
     graph.add_edge("clarify", END)
+    graph.add_edge("contextualize", "retrieve_generate")
     graph.add_edge("retrieve_generate", "check_confidence")
     graph.add_conditional_edges(
         "check_confidence",

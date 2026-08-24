@@ -18,6 +18,23 @@ load_dotenv()
 
 
 class Settings:
+    # Postgres — user accounts, conversations, and message history (Phase 6)
+    postgres_dsn: str = os.environ.get(
+        "POSTGRES_DSN", "postgresql://docmind:docmind_dev@localhost:5432/docmind"
+    )
+
+    # JWT — signs auth tokens. The default below is fine for local dev ONLY; a real deployment
+    # needs a long random secret set via the environment, never committed to source control.
+    jwt_secret_key: str = os.environ.get("JWT_SECRET_KEY", "dev-only-insecure-secret-change-me")
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = int(os.environ.get("JWT_EXPIRE_MINUTES", "1440"))  # 24h default
+
+    # How many recent messages to load as conversation history for a follow-up question.
+    # 6 messages = 3 user/assistant turns — enough to resolve "what about X instead?" style
+    # follow-ups without bloating every prompt with the entire conversation history.
+    conversation_history_turns: int = 6
+
+
     # Qdrant
     qdrant_host: str = os.environ.get("QDRANT_HOST", "localhost")
     qdrant_port: int = int(os.environ.get("QDRANT_PORT", "6333"))

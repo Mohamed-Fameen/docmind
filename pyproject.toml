@@ -37,6 +37,10 @@ dependencies = [
     # Persistence
     "sqlalchemy>=2.0.36",
     "psycopg2-binary>=2.9.10",
+    "bcrypt>=4.1.0",
+    "pyjwt>=2.9.0",
+    "email-validator>=2.2.0",
+    "python-multipart>=0.0.12",
     "redis>=5.2.0",
 ]
 

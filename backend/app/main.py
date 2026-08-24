@@ -1,8 +1,9 @@
 """
-DocMind backend — the /query endpoint routes each request through the Phase 5 agent graph
-(classify -> direct/clarify/retrieve, with a confidence-based retry loop), which internally
-uses Phase 4's retrieval (hybrid search + reranking) and generation (model registry) building
-blocks.
+DocMind backend.
+
+Phase 6 additions: /auth/register and /auth/login issue JWTs; /query now requires a valid
+token, persists each turn (question + answer) to Postgres under a conversation, and loads
+recent prior turns from that same conversation as context for follow-up questions.
 """
 
 import json
@@ -11,12 +12,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Session
 
 from .agent import build_agent_graph
+from .auth import create_access_token, get_current_user, hash_password, verify_password
 from .citations import extract_cited_numbers
 from .config import settings
+from .db import Base, engine, get_db
+from .models_db import Conversation, Message, User
 from .retrieval import RetrievalPipeline
 
 pipeline = RetrievalPipeline()
@@ -32,6 +38,11 @@ async def lifespan(app: FastAPI):
     # expensive to load (seconds) and must not be reloaded on every request.
     pipeline.load()
     agent_graph = build_agent_graph(pipeline)
+
+    # Create tables if they don't exist yet. See db.py's docstring for why this is a
+    # deliberate simplification (no Alembic migrations yet) rather than an oversight.
+    Base.metadata.create_all(bind=engine)
+
     QUERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     yield
 
@@ -39,9 +50,61 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DocMind API", version="0.1.0", lifespan=lifespan)
 
 
+# --- Auth models & endpoints --------------------------------------------------------
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+@app.post("/auth/register", response_model=TokenResponse)
+def register(request: RegisterRequest, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == request.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    user = User(email=request.email, hashed_password=hash_password(request.password))
+    db.add(user)
+    db.commit()
+
+    token = create_access_token(user_id=user.id)
+    return TokenResponse(access_token=token)
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    """
+    Uses OAuth2PasswordRequestForm (form-encoded username/password, not JSON) — this is
+    what FastAPI's OAuth2PasswordBearer expects to pair with, and what the auto-generated
+    /docs page's "Authorize" button knows how to call directly. `username` here just holds
+    the email; OAuth2's form field is named `username` regardless of what the value actually
+    represents.
+    """
+    user = db.query(User).filter(User.email == form_data.username).first()
+    if user is None or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = create_access_token(user_id=user.id)
+    return TokenResponse(access_token=token)
+
+
+# --- Query models & endpoint ---------------------------------------------------------
+
+
 class QueryRequest(BaseModel):
     query: str
     model: str | None = None  # registry key from config.MODEL_REGISTRY; defaults if omitted
+    conversation_id: str | None = None  # omit to start a new conversation
 
 
 class SourceRef(BaseModel):
@@ -58,6 +121,23 @@ class QueryResponse(BaseModel):
     model_used: str
     classification: str  # "direct" | "clarify" | "retrieve" — visible for debugging/eval
     retries: int          # how many times the agent rewrote the query and re-retrieved
+    conversation_id: str  # echo back so the client can continue this thread
+
+
+def _load_history(db: Session, conversation_id: str) -> list[dict]:
+    """
+    Loads the most recent N messages (settings.conversation_history_turns) from a
+    conversation, oldest first, in the {"role", "content"} shape build_prompt expects.
+    """
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc())
+        .limit(settings.conversation_history_turns)
+        .all()
+    )
+    messages.reverse()  # query gave newest-first; prompt needs oldest-first
+    return [{"role": m.role, "content": m.content} for m in messages]
 
 
 def _log_query(
@@ -91,7 +171,7 @@ def _log_query(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "phase": "5 — agentic layer"}
+    return {"status": "ok", "phase": "6 — memory & auth"}
 
 
 @app.get("/models")
@@ -110,7 +190,11 @@ def list_models():
 
 
 @app.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest):
+def query(
+    request: QueryRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
     Note: this is a sync `def`, not `async def`. FastAPI runs sync route functions in a
     threadpool automatically — appropriate here since embedding, BM25 scoring, reranking,
@@ -125,12 +209,27 @@ def query(request: QueryRequest):
             detail=f"Unknown model '{request.model}'. Available: {available}",
         )
 
+    # Resolve or create the conversation this message belongs to. A conversation_id from
+    # someone else's account must be rejected, not silently ignored — otherwise a user could
+    # read another user's chat history just by guessing/reusing an id.
+    if request.conversation_id:
+        conversation = db.get(Conversation, request.conversation_id)
+        if conversation is None or conversation.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+    else:
+        conversation = Conversation(user_id=current_user.id)
+        db.add(conversation)
+        db.commit()
+
+    history = _load_history(db, conversation.id)
+
     start = time.monotonic()
 
     initial_state = {
         "query": request.query,
         "original_query": request.query,
         "model": request.model,
+        "history": history,
         "classification": "",
         "chunks": [],
         "source_refs": [],
@@ -149,6 +248,19 @@ def query(request: QueryRequest):
         for ref in result["source_refs"]
     ]
 
+    # Persist both sides of this turn. Only assistant messages carry `sources` — a user
+    # message has none to store.
+    db.add(Message(conversation_id=conversation.id, role="user", content=request.query))
+    db.add(
+        Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=result["answer"],
+            sources=[s.model_dump() for s in sources],
+        )
+    )
+    db.commit()
+
     _log_query(request.query, result, cited_numbers, latency)
 
     return QueryResponse(
@@ -157,4 +269,5 @@ def query(request: QueryRequest):
         model_used=result["model_used"],
         classification=result["classification"],
         retries=result["retry_count"],
+        conversation_id=conversation.id,
     )
