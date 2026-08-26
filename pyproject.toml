@@ -2,7 +2,12 @@
 name = "docmind"
 version = "0.1.0"
 description = "Agentic RAG assistant over Kubernetes documentation"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"  # ragas's async executor is confirmed incompatible with
+                                    # 3.14 (RuntimeError: Timeout should be used inside a
+                                    # task, on every single scoring job, fixed by switching
+                                    # to 3.12) — capping the upper bound so this doesn't get
+                                    # silently rediscovered by re-running `uv sync` on a
+                                    # machine that defaults to the newest available Python
 dependencies = [
     # Backend
     "fastapi>=0.115.0",
@@ -19,6 +24,9 @@ dependencies = [
     # LLM orchestration
     "langgraph>=0.2.40",
     "langchain-core>=0.3.15",
+    "langchain-community>=0.3.0",
+    "langchain-ollama>=0.2.0",
+    "langchain-huggingface>=0.1.0",
     "ollama>=0.3.3",
     "anthropic>=0.39.0",
     "openai>=1.54.0",
@@ -32,6 +40,9 @@ dependencies = [
 
     # Eval
     "ragas>=0.2.6",
+    "pillow>=10.0.0",  # ragas's multi-modal prompt support imports PIL unconditionally,
+                        # even for text-only use like ours — genuinely missing, not a
+                        # version conflict like the langchain_community/vertexai issue above
     "datasets>=3.1.0",
 
     # Persistence
