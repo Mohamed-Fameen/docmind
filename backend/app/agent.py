@@ -52,9 +52,16 @@ how to handle the user's message below.
 Reply with EXACTLY ONE WORD and nothing else:
 - RETRIEVE — the message is a real question about Kubernetes that needs looking up documentation
 - DIRECT — the message is a greeting, thanks, or small talk needing no documentation (e.g. "hi", "thanks", "what can you do")
-- CLARIFY — the message is too vague or ambiguous to search for (e.g. "help", "it doesn't work")
+- CLARIFY — the message is too vague or ambiguous to search for even WITH the conversation \
+context below (e.g. "help", "it doesn't work")
 
-Message: "{query}"
+IMPORTANT: if there is conversation history below, use it to understand the message before \
+deciding. A message that sounds vague completely on its own — including a correction like \
+"that's not what I asked" or "I meant X, not Y" — is very often a clear, answerable follow-up \
+once you see what was discussed before it. Only classify as CLARIFY if the message is STILL \
+ambiguous after considering the conversation so far, not just when read in total isolation.
+
+{history_block}Message: "{query}"
 
 One word answer:"""
 
@@ -111,7 +118,18 @@ def build_agent_graph(pipeline: RetrievalPipeline):
     """
 
     def classify_node(state: AgentState) -> dict:
-        prompt = CLASSIFY_PROMPT.format(query=state["query"])
+        # Real bug found via actual usage, not just theorized: without history, a coherent
+        # follow-up or correction ("I didn't ask about X, only Y") reads as vague in total
+        # isolation, and got misclassified as CLARIFY every time — producing an infinite
+        # loop of the same canned clarifying question no matter how the user rephrased
+        # their correction. Fixed by giving classify the same conversation history
+        # contextualize/retrieve_generate already receive.
+        history_block = ""
+        if state["history"]:
+            turns = "\n".join(f"{h['role'].upper()}: {h['content']}" for h in state["history"])
+            history_block = f"CONVERSATION SO FAR:\n{turns}\n\n"
+
+        prompt = CLASSIFY_PROMPT.format(history_block=history_block, query=state["query"])
         response, _ = generate_answer(prompt, model_name=state["model"])
         upper = response.strip().upper()
 

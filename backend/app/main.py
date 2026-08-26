@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -48,6 +49,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DocMind API", version="0.1.0", lifespan=lifespan)
+
+# The frontend (Next.js dev server, localhost:3000) and this API (localhost:8000) are
+# different origins as far as the browser is concerned — CORS must be explicitly allowed
+# here, or every fetch() call from the frontend fails before it even reaches our routes.
+# Restricted to the specific dev origin rather than "*" (allow everything), since allowing
+# all origins would mean any website could call this API using a logged-in user's browser.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --- Auth models & endpoints --------------------------------------------------------

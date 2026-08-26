@@ -1,34 +1,36 @@
 # Python
 __pycache__/
-*.py[cod]
-*.so
-
-# Virtual environments
-venv/
+*.pyc
 .venv/
-env/
+.python-version
+*.egg-info/
+
+# Env / secrets
+.env
+
+# Data (raw/processed docs can be large — don't commit)
+data/raw/
+data/processed/
+*.jsonl
+
+# Vector DB / DB volumes (if run locally outside Docker)
+qdrant_storage/
+
+# Node / frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
 
 # Jupyter
 .ipynb_checkpoints/
 
-# Environment/secrets
-.env
-.env.*
-
-# Data
-data/*
-!data/.gitkeep
-
-# Models
-models/
-*.pt
-*.pth
-*.ckpt
-*.safetensors
-
-# Logs
-*.log
-
 # OS
 .DS_Store
-docmind*.zip
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+frontend/node_modules/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo

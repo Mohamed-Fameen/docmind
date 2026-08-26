@@ -235,13 +235,28 @@ Query with someone else's conversation_id: not yet tested
   after real user data exists.
 - No password reset / email verification flow — acceptable for a portfolio project, would
   be required for anything with real users.
-- `classify_node` and `direct_node` still don't receive conversation history — a greeting
-  doesn't need it, but a vague follow-up classified as `clarify` arguably could use it to
-  ask a more targeted clarifying question. Noted, not built, to keep scope bounded.
+- ~~`classify_node` and `direct_node` still don't receive conversation history~~ — **found
+  as a real bug during actual UI testing (Phase 7), not just a theoretical gap, and fixed.**
+  Without history, a coherent follow-up correction ("I did not ask about replicaset, only
+  about deployments") read as vague in total isolation and got stuck classifying as
+  `clarify` on every rephrasing — a real infinite-clarify loop a live user hit. Fixed by
+  threading history into `classify_node`'s prompt too, with explicit instruction to use
+  conversation context before deciding CLARIFY vs RETRIEVE. Verified against the exact
+  reported conversation, then against a full 3-turn follow-up chain ("deployments" →
+  "replicaset" → "compare both of them") — the last one correctly used both prior turns to
+  resolve "both" with no antecedent of its own, retrieving the exact right comparison page.
+  `direct_node` still doesn't receive history — lower priority, since a greeting/thanks
+  genuinely doesn't need conversation context to handle correctly.
 - Redis (originally planned for "session-level fast access") wasn't introduced in this
   phase — Postgres alone is sufficient at this project's scale, and adding a cache layer
   before there's a measured latency problem would be solving a problem that doesn't exist
   yet. Revisit if `_load_history`'s query time ever actually shows up as a bottleneck.
+- Minor cosmetic issue found during the same real testing: answers sometimes append a
+  redundant, occasionally mislabeled citation summary line after the main text (e.g. "[1]
+  ReplicaSet > Introduction" when source [1] was actually a different page). Doesn't affect
+  the main answer's correctness — the inline citations within the answer body are correct —
+  just an odd trailing artifact. Worth a future prompt tweak (explicitly disallow repeating
+  a citation summary after the answer), not urgent.
 - **Citation-content grounding remains unverified** — the `[N]` citation validator confirms
   a number was used, never that the chunk's actual content supports the specific claim next
   to it. The QuantumScheduler-style "honest decline" cases from Phase 5 suggest the model
