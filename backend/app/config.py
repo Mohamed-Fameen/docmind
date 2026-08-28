@@ -90,8 +90,19 @@ class Settings:
             # Check https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
             # for current model IDs before deploying — these change as AWS adds/retires
             # model versions, and a stale ID here would fail at request time, not at startup.
+            # Confirmed the hard way: the previous default (Claude 3.5 Haiku,
+            # anthropic.claude-3-5-haiku-20241022-v1:0) hit a real
+            # ResourceNotFoundException ("This model version has reached the end of its
+            # life") — it's been moved to Legacy status on Bedrock. Current default is its
+            # recommended successor, Claude Haiku 4.5. Note the "us." prefix: many newer
+            # Claude models on Bedrock require a cross-region INFERENCE PROFILE rather than
+            # the bare model ID — calling the bare ID for a model that needs one fails with
+            # a different error ("on-demand throughput isn't supported... retry with an
+            # inference profile"). The prefix identifies which region group the profile
+            # routes through (us., eu., jp., global. are the current options) — use "us."
+            # unless deploying somewhere that specifically needs a different one.
             "bedrock_model_id": os.environ.get(
-                "BEDROCK_MODEL_ID", "anthropic.claude-3-5-haiku-20241022-v1:0"
+                "BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
             ),
             "bedrock_region": os.environ.get("AWS_REGION", "us-east-1"),
             "description": "Hosted via AWS Bedrock. Requires AWS credentials configured.",
