@@ -1,0 +1,101 @@
+# Production stack for EC2 — everything needed to run DocMind, without any local-dev-only
+# pieces (no Ollama — production generation goes through Bedrock; no bind-mounted source
+# code — the image is built once and run as a fixed artifact).
+#
+# AWS credentials: deliberately NOT set as environment variables here. With an IAM role
+# attached to the EC2 instance, boto3's default credential chain picks up credentials
+# automatically and securely from the instance metadata service — no long-lived keys on
+# disk anywhere. This is strictly better than an env-var-based approach, and only becomes
+# possible once actually deploying to real AWS infrastructure (see docs/09-deployment.md).
+#
+# Logging: every service ships its stdout/stderr straight to CloudWatch Logs via Docker's
+# native awslogs driver — no separate CloudWatch agent needs installing on the host. Log
+# groups are created automatically on first write (requires logs:CreateLogGroup on the
+# instance's IAM role — see docs/09-deployment.md for the exact policy).
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml build \
+#     --build-arg NEXT_PUBLIC_API_URL=http://<your-ec2-public-ip>:8000
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant_data:/qdrant/storage
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /docmind/qdrant
+        awslogs-create-group: "true"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: docmind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a real password in .env, not the dev default}
+      POSTGRES_DB: docmind
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /docmind/postgres
+        awslogs-create-group: "true"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      POSTGRES_DSN: postgresql://docmind:${POSTGRES_PASSWORD}@postgres:5432/docmind
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set a real random secret in .env, not the dev default}
+      ACTIVE_MODEL: claude-bedrock
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # Confirmed working (see docs/09-deployment.md) — but check
+      # https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html before
+      # relying on this indefinitely; AWS actively retires older model versions.
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-us.anthropic.claude-haiku-4-5-20251001-v1:0}
+      # No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY here — see the note at the top of this
+      # file. If running this compose file somewhere WITHOUT an IAM role available (e.g.
+      # still testing locally before deploying), set those two back temporarily.
+    ports:
+      - "8000:8000"
+    depends_on:
+      - qdrant
+      - postgres
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /docmind/backend
+        awslogs-create-group: "true"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?set this to wherever the backend is publicly reachable}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /docmind/frontend
+        awslogs-create-group: "true"
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  postgres_data:

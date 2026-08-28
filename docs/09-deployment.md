@@ -121,6 +121,73 @@ isolated script) before considering Bedrock fully verified — this project's ow
 is the concrete argument for why: the isolated test can pass while a subsequent real call
 still fails on a requirement the isolated test didn't happen to trigger.
 
+## Deployment target: AWS EC2, chosen deliberately
+
+DigitalOcean was the original recommendation for simplicity, but EC2 won out for real
+reasons: an AWS account already existed (from Bedrock setup) so no new account/billing
+relationship was needed, "AWS" carries far more resume weight than any VPS provider name,
+and — most concretely — EC2 unlocks **IAM roles**, which fix a real, previously-flagged
+weakness: long-lived `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` sitting in an env file.
+An IAM role attached directly to the instance lets `boto3` pick up credentials
+automatically from the instance metadata service — no secrets on disk at all.
+
+### Instance sizing: Graviton (ARM) for real cost savings
+
+`t4g.medium` (2 vCPU, 4GB RAM, ARM/Graviton) instead of the x86 `t3` equivalent — Graviton
+is meaningfully cheaper (~20%) for the same specs. This works with zero Dockerfile changes:
+`python:3.12-slim` and `node:20-slim` are official multi-architecture images, so Docker
+automatically pulls the correct ARM build.
+
+4GB was chosen deliberately, not as a default — the embedding model + reranker + BM25 index
+memory footprint was worked out explicitly (~2.5-3GB) back when this same math prevented an
+RTX 3050 VRAM crash in Phase 4. A 2GB instance would very likely repeat that exact failure
+mode, just on a paid server instead of a local GPU.
+
+### IAM role setup (create before launching the instance)
+
+1. IAM → Roles → Create role → Trusted entity: AWS service → EC2
+2. Attach `AmazonBedrockFullAccess` (managed policy; scoping down to just
+   `bedrock:InvokeModel` is a good follow-up exercise once everything works)
+3. Add an inline policy for CloudWatch Logs (needed for the logging setup below):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    }
+  ]
+}
+```
+
+4. Name it (e.g. `docmind-ec2-role`), attach it at instance launch time
+
+### CloudWatch logging — via Docker's native driver, not a separate agent
+
+`docker-compose.prod.yml` now sets `logging: driver: awslogs` on every service, each with
+its own log group (`/docmind/backend`, `/docmind/frontend`, `/docmind/qdrant`,
+`/docmind/postgres`). Container stdout/stderr streams straight to CloudWatch Logs — no
+CloudWatch agent installed on the host needed, which would be the more complex, older
+approach. Log groups are created automatically on first write (`awslogs-create-group:
+"true"`), given the IAM policy above.
+
+### No TLS/domain for this deployment — a known, accepted gap
+
+Deployed to the instance's raw public IP, no domain. Let's Encrypt (and therefore Caddy's
+automatic HTTPS) can't issue a certificate for a bare IP address, so this deployment is
+plain HTTP. Acceptable for a portfolio demo, but worth being explicit: login sends real JWT
+tokens, which would travel unencrypted here. Fixing this later (once a domain exists) means
+adding a Caddy reverse-proxy service to the compose file — a small, additive change, not a
+rebuild.
+
 ## Deployment target — a decision to make explicitly, not assume
 
 Options, roughly in order of cost/complexity:
