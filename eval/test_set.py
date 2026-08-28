@@ -27,6 +27,31 @@ QUERY_LOG_PATH = Path("data/logs/queries.jsonl")
 # (faithfulness, answer_relevancy, context_precision) works without one.
 CURATED_TEST_SET = [
     {
+        # Found via real manual testing, not hypothesized — a genuinely revealing case.
+        # "features" collides lexically with Kubernetes' own technical vocabulary (the
+        # "Feature gate" glossary page, the `.status.declaredFeatures` API field), and a
+        # weak query can get retrieval to lock onto the wrong sense of a word entirely. The
+        # local 3B model retrieved and confidently, correctly-cited an answer about the
+        # WRONG topic (API feature flags, not "what can Kubernetes do") — a well-grounded
+        # answer to a misinterpreted question, which check_confidence's uncertainty-phrase/
+        # zero-citation heuristic has no way to catch, since the answer wasn't ungrounded,
+        # just off-target. Bedrock's stronger reasoning at the classify/rewrite stage
+        # recovered via a retry and landed on the actually-intended overview pages. This is
+        # exactly the kind of semantic-drift failure RAGAS's answer_relevancy metric is
+        # built to catch (it measures answer-to-ORIGINAL-question fit, not just internal
+        # groundedness) — a good real test for that specific metric's value.
+        "question": "What are the features for kubernetes?",
+        "ground_truth": (
+            "Kubernetes provides service discovery and load balancing, storage "
+            "orchestration (automatically mounting storage systems of your choice), "
+            "automated rollouts and rollbacks to a desired state, automatic bin packing "
+            "of containers based on resource needs, self-healing (restarting or "
+            "replacing failed containers), secret and configuration management, "
+            "horizontal scaling, and batch execution — among other features for running "
+            "distributed containerized applications resiliently."
+        ),
+    },
+    {
         "question": "how do I set the current context in kubeconfig",
         "ground_truth": (
             "Use the command `kubectl config use-context CONTEXT_NAME` to set the "

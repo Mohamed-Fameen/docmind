@@ -79,19 +79,31 @@ This actually simplifies setup versus what was originally documented here.
    `AmazonBedrockFullAccess` managed policy is the simplest option to start with; a more
    locked-down custom policy scoped to just `bedrock:InvokeModel` is better practice once
    this is more than a first test), with an access key ID/secret generated for it.
-2. **A correct, currently-available `BEDROCK_MODEL_ID`** — this matters more than it might
+2. **Anthropic's one-time "use case details" form** — a real, distinct requirement found
+   the hard way: an isolated connectivity test succeeded initially, but the same model call
+   through the full agent graph shortly after failed with `ResourceNotFoundException: Model
+   use case details have not been submitted for this account`. This is **not** the general
+   Bedrock Model Access page (retired, see above) — it's an Anthropic-specific, one-time
+   form, separate from IAM permissions entirely. **Fix**: AWS Bedrock Console → Model
+   catalog → select any Anthropic model → submit the "use case details" form (company
+   name/website is typically sufficient) → **wait 15-30 minutes** before retrying — several
+   independent reports confirm this doesn't take effect immediately, and a fast retry will
+   look like the fix didn't work even when it was submitted correctly.
+3. **A correct, currently-available `BEDROCK_MODEL_ID`** — this matters more than it might
    look. AWS has been actively retiring older model versions on Bedrock on a defined
    lifecycle (Legacy status, then an "Extended Access" period at premium pricing, then
-   end-of-life) — Claude 3.5 Sonnet models specifically moved through this cycle in
-   late 2025/early 2026. A hardcoded default model ID can go stale over time even after
-   working correctly once, so check
+   end-of-life) — Claude 3.5 Sonnet and Claude 3.5 Haiku both moved through this cycle in
+   late 2025/early 2026, confirmed the hard way (the original default in this project hit
+   exactly this end-of-life error on first real use). Current default:
+   `us.anthropic.claude-haiku-4-5-20251001-v1:0` — check
    https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html for the
-   current model catalog and each model's lifecycle status before relying on one, rather
-   than trusting `config.py`'s default indefinitely.
+   current catalog before relying on this indefinitely.
 
-Once credentials are set and a current model ID is confirmed, test the connection **in
-isolation**, before trusting it through the full agent graph — same principle as every
-other real library integration in this project:
+Once all three are done, test the connection **in isolation** first, before trusting it
+through the full agent graph — same principle as every other real library integration in
+this project, though worth knowing this specific case showed a real limit to that
+principle: an isolated test alone wasn't sufficient here, since the use-case-details
+requirement only surfaced on a second, slightly different call:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -103,7 +115,11 @@ uv run python scripts/test_bedrock.py
 
 `scripts/test_bedrock.py` deliberately skips loading Qdrant, the embedding model, and
 everything else — if this fails, the cause can only be credentials, IAM permissions,
-region, or a stale/incorrect `BEDROCK_MODEL_ID`, not anything in DocMind's own code.
+the use-case-details form, region, or a stale/incorrect `BEDROCK_MODEL_ID`, not anything in
+DocMind's own code. **Then also test through the real `/query` endpoint** (not just the
+isolated script) before considering Bedrock fully verified — this project's own experience
+is the concrete argument for why: the isolated test can pass while a subsequent real call
+still fails on a requirement the isolated test didn't happen to trigger.
 
 ## Deployment target — a decision to make explicitly, not assume
 
@@ -136,25 +152,36 @@ docker compose -f docker-compose.prod.yml up -d
 curl http://localhost:8000/health
 ```
 
-## Results
+**UPDATE — confirmed fully working** after submitting Anthropic's use-case-details form and
+waiting the propagation delay. Real `/query` call through the full agent graph (not just
+the isolated script) succeeded with `model: "claude-bedrock"`, producing a correctly
+grounded, correctly cited answer. All three fixes were genuinely necessary — this wasn't
+solved by any single one of them alone.
 
 ```
-scripts/test_bedrock.py: SUCCESS — model_used: claude-bedrock, answer: 'OK'
+scripts/test_bedrock.py (isolated): SUCCESS — model_used: claude-bedrock, answer: 'OK'
 
-This took two real fixes to get here, both against genuinely stale information, not
-hypothetical concerns:
-  1. AWS retired the "Model access" console page (Sep 29, 2025) — my original setup
+BUT the same model, called through the real /query endpoint shortly after, FAILED:
+  ResourceNotFoundException: Model use case details have not been submitted for this
+  account. Fill out the Anthropic use case details form before using the model.
+
+This is the most important finding from this whole phase: an isolated connectivity test
+passing is NOT sufficient proof a production LLM path is ready — it can pass while a
+subsequent real call still fails on a requirement the isolated test didn't happen to
+trigger. Three real fixes were needed in total, not one:
+  1. AWS retired the "Model access" console page (Sep 29, 2025) — original setup
      instructions referenced a manual approval step that no longer exists.
-  2. The originally-configured default model (Claude 3.5 Haiku,
-     anthropic.claude-3-5-haiku-20241022-v1:0) had reached end-of-life on Bedrock —
-     ResourceNotFoundException on first real invocation. Fixed by switching to the
-     current recommended successor, Claude Haiku 4.5, AND discovering that newer Claude
-     models on Bedrock need a cross-region inference profile ID (a "us." prefix) rather
-     than the bare model ID — us.anthropic.claude-haiku-4-5-20251001-v1:0.
+  2. The originally-configured default model (Claude 3.5 Haiku) had reached end-of-life
+     on Bedrock — fixed by switching to Claude Haiku 4.5 with the correct cross-region
+     inference profile prefix (us.anthropic.claude-haiku-4-5-20251001-v1:0).
+  3. Anthropic's one-time "use case details" form, a distinct requirement from IAM/model
+     access entirely — submitted via the Bedrock Console's Model catalog, with a real
+     ~15-30 minute propagation delay before it takes effect.
 
 Lesson: a hardcoded model ID is not a "set once" constant for a service like Bedrock —
-AWS actively retires model versions on a defined lifecycle, so this needs periodic
-re-checking, not a permanent assumption.
+AWS actively retires model versions on a defined lifecycle. And "it worked once" is not
+the same bar as "it's ready for production" — the full request path needs testing, not
+just a minimal connectivity check.
 
 docker compose build: ___
 docker compose up: ___
@@ -183,8 +210,11 @@ Chosen deployment target:
 - [x] `docker-compose.prod.yml` — full stack (qdrant, postgres, backend, frontend)
 - [x] `.dockerignore` (root + frontend) — keeps secrets/local files out of images
 - [x] `scripts/test_bedrock.py` — isolated Bedrock connectivity test
-- [x] Bedrock actually tested against real AWS credentials — SUCCESS, after fixing two
-      real, stale-information issues (retired model-access page, end-of-life model ID)
+- [x] Bedrock isolated connectivity test succeeded — but this alone was NOT sufficient
+      proof of readiness (see Results above); real `/query` call surfaced a third fix
+      needed (Anthropic's use-case-details form) that the isolated test didn't trigger
+- [ ] Bedrock verified through the real `/query` endpoint, not just the isolated script —
+      pending, waiting on the use-case-details form's ~15-30 min propagation delay
 - [ ] Container build/run tested on real hardware
 - [ ] Deployment target chosen and (optionally) actually deployed
 - [ ] Results filled in above
