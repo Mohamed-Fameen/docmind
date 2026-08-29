@@ -34,3 +34,6 @@ Thumbs.db
 frontend/node_modules/
 frontend/.next/
 frontend/tsconfig.tsbuildinfo
+
+# Delivery zips (from working with Claude) — never belong in the actual project
+docmind-*.zip

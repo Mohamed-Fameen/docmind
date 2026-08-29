@@ -1,0 +1,7 @@
+# Local-dev-only files that must NOT leak into the built image — .env.local specifically
+# matters here: it would otherwise get copied in and could create confusion about whether
+# NEXT_PUBLIC_API_URL came from the Docker build arg or a stray local file.
+node_modules/
+.next/
+.env.local
+.git/
