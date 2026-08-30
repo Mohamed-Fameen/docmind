@@ -28,7 +28,18 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 # Copy dependency files first (before the rest of the source) so Docker's layer cache can
 # skip reinstalling dependencies on every rebuild when only application code changed.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+
+# torch is handled separately from the rest of the dependencies, deliberately: uv.lock was
+# generated on a machine WITH a GPU (RTX 3050), so `uv sync --frozen` would otherwise
+# install the full CUDA-enabled torch build here too — including several GB of NVIDIA
+# libraries (nvidia-cublas, nvidia-cudnn, etc.) that are completely unusable on this
+# GPU-less ARM server, and large enough to exhaust a default EC2 root volume outright (this
+# is exactly what happened the first time this was actually built: a real
+# "No space left on device" failure mid-install, not a hypothetical concern).
+# --no-install-package excludes torch from the locked sync; it's then installed separately
+# from PyTorch's dedicated CPU-only wheel index, which is dramatically smaller.
+RUN uv sync --frozen --no-dev --no-install-project --no-install-package torch
+RUN uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 COPY backend/ ./backend/
 COPY data/processed/chunks.jsonl ./data/processed/chunks.jsonl
