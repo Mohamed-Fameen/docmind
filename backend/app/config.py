@@ -34,6 +34,17 @@ class Settings:
     # follow-ups without bloating every prompt with the entire conversation history.
     conversation_history_turns: int = 6
 
+    # Which frontend origin(s) are allowed to call this API — comma-separated if more than
+    # one (e.g. local dev AND a deployed frontend). Defaults to localhost:3000 for local
+    # dev; MUST be set to the real frontend URL in production, or the browser blocks every
+    # request with a CORS error before it even reaches this API — this exact failure mode
+    # was hit for real the first time this was deployed to EC2 with only the dev default set.
+    cors_allowed_origins: list[str] = [
+        origin.strip()
+        for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+        if origin.strip()
+    ]
+
 
     # Qdrant
     qdrant_host: str = os.environ.get("QDRANT_HOST", "localhost")

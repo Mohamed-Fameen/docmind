@@ -57,7 +57,7 @@ app = FastAPI(title="DocMind API", version="0.1.0", lifespan=lifespan)
 # all origins would mean any website could call this API using a logged-in user's browser.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
